@@ -8,7 +8,7 @@ const path = require('path');
 const fs = require('fs');
 const uniqid = require('uniqid');
 const cloudinary = require('cloudinary').v2;
-const news_api = require('./utils/news_api');
+const {scrap_data}  = require('./utils/news_api');
 const Notification = require('./models/notifications');
 const http = require('http');
 const io = require('socket.io')(http);
@@ -19,13 +19,13 @@ app.use(express.json());
 //                                     Env Configuration
 // \--------------------------------------------------------------------------------------------/
 
-dotenv.config({ path: './.env' });
+dotenv.config();
 
 // /--------------------------------------------------------------------------------------------\
 //                                     Port Configuration
 // \--------------------------------------------------------------------------------------------/
 
-const port = process.env.PORT || 8000;
+const port = process.env.PORT || 8080;
 
 // /--------------------------------------------------------------------------------------------\
 //                                     Cors Configuration
@@ -60,74 +60,95 @@ cloudinary.config({
 //                                     MongoDB Collections Operations
 // \--------------------------------------------------------------------------------------------/
 
+
 app.get('/get-collections', async (req, res) => {
     try {
-        let collection_list = []
-        await db.db.connect();
-        const collections = await db.db.Connection.db.listCollections().toArray();
-        collections.map((collection) => {
+        let collection_list = [];
+        await db.connect(); // Connect to MongoDB
+
+        // Fetch all collections in the database
+        const collections = await db.Connection.db.listCollections().toArray();
+        collections.forEach((collection) => {
             collection_list.push(collection.name);
-        })
-        await db.db.disconnect();
+        });
+
+        await db.disconnect(); // Disconnect after fetching
         res.json(collection_list);
     } catch (error) {
-        await db.db.disconnect();
+       // console.error('Error fetching collections:', error.message);
+        await db.disconnect();
         res.status(500).send("Internal Server Error");
     }
-})
+});
 
 app.get('/create-collection/:collection_name', async (req, res) => {
     try {
-        let collection_list = []
         const collection_name = req.params.collection_name;
-        await db.db.connect();
-        let collection = await db.db.Connection.db.listCollections({ name: collection_name }).next();
-        // console.log(collection);
-        if (collection) {
-            await db.db.disconnect();
-            res.status(200).json({ stat: 0, msg: "Collection already exists" });
-        } else {
-            const collection = await db.db.Connection.createCollection(collection_name);
-            if (collection) {
-                const collections = await db.db.Connection.db.listCollections().toArray();
-                collections.map((collection) => {
-                    collection_list.push(collection.name);
-                })
-            }
-            await db.db.disconnect();
-            res.json(collection_list);
+        let collection_list = [];
+
+        await db.connect(); // Connect to MongoDB
+
+        // Check if the collection already exists
+        const existingCollection = await db.Connection.db.listCollections({ name: collection_name }).next();
+        if (existingCollection) {
+            await db.disconnect(); // Disconnect if the collection already exists
+            return res.status(200).json({ stat: 0, msg: "Collection already exists" });
         }
 
+        // Create a new collection
+        await db.Connection.db.createCollection(collection_name);
+        //console.log(`Collection '${collection_name}' created successfully.`);
+
+        // Fetch updated list of collections
+        const collections = await db.Connection.db.listCollections().toArray();
+        collections.forEach((collection) => {
+            collection_list.push(collection.name);
+        });
+
+        await db.disconnect(); // Disconnect after operation
+        res.json(collection_list);
     } catch (error) {
-        await db.db.disconnect();
+ //       console.error('Error creating collection:', error.message);
+        await db.disconnect();
         res.status(500).send("Internal Server Error");
-    }
-})
+}
+});
+
 
 app.get('/drop-collection/:collection_name', async (req, res) => {
     try {
         const collection_name = req.params.collection_name;
-        let collection_list = []
-        await db.db.connect();
-        let collection = await db.db.Connection.db.listCollections({ name: collection_name }).next();
-        if (collection) {
-            await db.db.Connection.db.dropCollection(collection_name);
-            const collections = await db.db.Connection.db.listCollections().toArray();
-            collections.map((collection) => {
-                collection_list.push(collection.name);
-            })
-            await db.db.disconnect();
-            res.status(200).json(collection_list);
-        } else {
-            await db.db.disconnect();
-            res.status(200).json({ stat: 0, msg: "Collection not exists" });
-        }
+        let collection_list = [];
 
+        // Connect to MongoDB
+        await db.connect();
+
+        // Check if the collection exists
+        const collection = await db.Connection.db.listCollections({ name: collection_name }).next();
+        if (collection) {
+            // Drop the collection
+            await db.Connection.db.dropCollection(collection_name);
+           // console.log(`Collection '${collection_name}' dropped successfully.`);
+
+            // Fetch updated list of collections
+            const collections = await db.Connection.db.listCollections().toArray();
+            collections.forEach((col) => {
+                collection_list.push(col.name);
+            });
+
+            await db.disconnect(); // Disconnect after operation
+            return res.status(200).json(collection_list );
+        } else {
+            await db.disconnect(); // Disconnect if the collection doesn't exist
+            return res.status(200).json({ stat: 0, msg: `Collection '${collection_name}' does not exist.` });
+        }
     } catch (error) {
-        await db.db.disconnect();
+      //console.error('Error dropping collection:', error.message);
+        await db.disconnect();
         res.status(500).send("Internal Server Error");
     }
-})
+});
+
 
 // /--------------------------------------------------------------------------------------------\
 //                                     MongoDB Insertion Operations
@@ -135,167 +156,222 @@ app.get('/drop-collection/:collection_name', async (req, res) => {
 
 app.post('/insert-one/:collection_name', async (req, res) => {
     try {
-        const collection_name = req.params.collection_name;
-        const doc = req.body;
-        // console.log(doc);
-        await db.db.connect();
-        let collection = await db.db.Connection.db.listCollections({ name: collection_name }).next();
-        if (collection) {
-            const collection = db.db.Connection.collection(collection_name);
-            await collection.insertOne(doc);
-            await db.db.disconnect();
-            res.status(200).json({ stat: 1, msg: "Done" });
+        const collection_name = req.params.collection_name; // Extract collection name from the URL
+        const doc = req.body; // Extract the document to be inserted from the request body
+        let collection_list = [];
+
+        // Check if MongoDB is already connected
+        if (!db.Connection.readyState || db.Connection.readyState === 0) {
+            await db.connect();
+        }
+
+        // Check if the collection exists
+        const collectionExists = await db.Connection.db.listCollections({ name: collection_name }).next();
+
+        if (collectionExists) {
+            // Insert the document into the collection
+            const collection = db.Connection.collection(collection_name);
+            const result = await collection.insertOne(doc);
+            // console.log(`Document inserted into '${collection_name}':`, result);
+
+            // Send success response
+            return res.status(200).json({
+                stat: 1,
+                msg: "Document inserted successfully."
+            });
         } else {
-            await db.db.disconnect();
-            res.json({ stat: 0, msg: "Collection not exists." });
+            return res.status(404).json({
+                stat: 0,
+                msg: `Collection '${collection_name}' does not exist.`
+            });
         }
     } catch (error) {
-        await db.db.disconnect();
+        // console.error('Error inserting document:', error.message);
+
+        // Send internal server error response
         res.status(500).send("Internal Server Error");
+    } finally {
+        // Ensure the connection is closed in all cases
+        if (db.Connection.readyState === 1) {
+            await db.disconnect();
+        }
     }
-})
+});
+
 
 app.post('/insert-many/:collection_name', async (req, res) => {
     try {
         const collection_name = req.params.collection_name;
-        const doc = req.body;
-        // console.log(doc);
-        await db.db.connect();
-        let collection = await db.db.Connection.db.listCollections({ name: collection_name }).next();
-        if (collection) {
-            const collection = db.db.Connection.collection(collection_name);
-            await collection.insertMany(doc);
-            await db.db.disconnect();
-            res.status(200).json({ stat: 1, msg: "Done" });
-        } else {
-            await db.db.disconnect();
-            res.json({ stat: 0, msg: "Collection not exists." });
-        }
+        const docs = req.body; // Assuming req.body contains an array of documents
 
+        // Connect to the database
+        await db.connect();
+
+        // Check if the collection exists
+        const collectionExists = await db.Connection.db
+            .listCollections({ name: collection_name })
+            .next();
+
+        if (collectionExists) {
+            // Get the collection and insert multiple documents
+            const collection = db.Connection.collection(collection_name);
+            const result = await collection.insertMany(docs);
+
+            // Disconnect after the operation
+            await db.disconnect();
+
+            // Return success response
+            res.status(200).json({
+                stat: 1,
+                msg: "Documents inserted successfully.",
+                insertedCount: result.insertedCount,
+            });
+        } else {
+            // Disconnect if the collection doesn't exist
+            await db.disconnect();
+            res.status(400).json({
+                stat: 0,
+                msg: `Collection '${collection_name}' does not exist.`,
+            });
+        }
     } catch (error) {
-        await db.db.disconnect();
-        res.status(500).send("Internal Server Error");
+        // Ensure disconnection in case of an error
+        await db.disconnect();
+        res.status(500).json({
+            stat: -1,
+            msg: "Internal Server Error",
+            error: error.message,
+        });
     }
-})
+});
 
 
 // /--------------------------------------------------------------------------------------------\
 //                                     MongoDB Find Operations
 // \--------------------------------------------------------------------------------------------/
 
+// Fetch all documents in a collection
 app.get('/find/:collection_name', async (req, res) => {
     try {
         const collection_name = req.params.collection_name;
-        await db.db.connect();
-        let collection = await db.db.Connection.db.listCollections({ name: collection_name }).next();
-        if (collection) {
-            const collection = db.db.Connection.collection(collection_name);
-            const collection_data = await collection.find().toArray();
-            await db.db.disconnect();
-            res.status(200).json(collection_data);
+
+        await db.connect();
+        const collectionExists = await db.Connection.db.listCollections({ name: collection_name }).next();
+
+        if (collectionExists) {
+            const collection = db.Connection.collection(collection_name);
+            const collectionData = await collection.find().toArray();
+
+            await db.disconnect();
+            res.status(200).json(collectionData);
         } else {
-            await db.db.disconnect();
-            res.json({ stat: 0, msg: "Collection not exists." });
+            await db.disconnect();
+            res.status(400).json({ stat: 0, msg: `Collection '${collection_name}' does not exist.` });
         }
     } catch (error) {
-        await db.db.disconnect();
-        res.status(500).send("Internal Server Error");
+        await db.disconnect();
+        res.status(500).json({ stat: -1, msg: "Internal Server Error", error: error.message });
     }
-})
+});
 
+// Fetch the latest documents in a collection
 app.get('/find-latest/:collection_name', async (req, res) => {
     try {
         const collection_name = req.params.collection_name;
-        await db.db.connect();
-        let collection = await db.db.Connection.db.listCollections({ name: collection_name }).next();
-        if (collection) {
-            const collection = db.db.Connection.collection(collection_name);
-            const collection_data = await collection.find().toArray();
-            await db.db.disconnect();
-            res.status(200).json(collection_data.reverse());
+
+        await db.connect();
+        const collectionExists = await db.Connection.db.listCollections({ name: collection_name }).next();
+
+        if (collectionExists) {
+            const collection = db.Connection.collection(collection_name);
+            const collectionData = await collection.find().sort({ _id: -1 }).toArray();
+
+            await db.disconnect();
+            res.status(200).json(collectionData);
         } else {
-            await db.db.disconnect();
-            res.json({ stat: 0, msg: "Collection not exists." });
+            await db.disconnect();
+            res.status(400).json({ stat: 0, msg: `Collection '${collection_name}' does not exist.` });
         }
     } catch (error) {
-        await db.db.disconnect();
-        res.status(500).send("Internal Server Error");
+        await db.disconnect();
+        res.status(500).json({ stat: -1, msg: "Internal Server Error", error: error.message });
     }
-})
+});
 
+// Fetch a limited number of the latest documents in a collection
 app.get('/find-latest/:collection_name/:limit', async (req, res) => {
     try {
         const collection_name = req.params.collection_name;
-        const limit = req.params.limit;
-        let final_data = [];
-        await db.db.connect();
-        let collection = await db.db.Connection.db.listCollections({ name: collection_name }).next();
-        if (collection) {
-            const collection = db.db.Connection.collection(collection_name);
-            const collection_data = await collection.find().toArray();
-            const reverse_collection = collection_data.reverse();
-            if (limit < reverse_collection.length) {
-                for (let i = 0; i < limit; i++) {
-                    final_data.push(reverse_collection[i]);
-                }
-                await db.db.disconnect();
-                res.status(200).json(final_data);
-            } else {
-                await db.db.disconnect();
-                res.status(200).json(reverse_collection);
-            }
+        const limit = parseInt(req.params.limit, 10);
 
+        await db.connect();
+        const collectionExists = await db.Connection.db.listCollections({ name: collection_name }).next();
+
+        if (collectionExists) {
+            const collection = db.Connection.collection(collection_name);
+            const collectionData = await collection.find().sort({ _id: -1 }).limit(limit).toArray();
+
+            await db.disconnect();
+            res.status(200).json(collectionData);
         } else {
-            await db.db.disconnect();
-            res.json({ stat: 0, msg: "Collection not exists." });
+            await db.disconnect();
+            res.status(400).json({ stat: 0, msg: `Collection '${collection_name}' does not exist.` });
         }
     } catch (error) {
-        await db.db.disconnect();
-        res.status(500).send("Internal Server Error");
+        await db.disconnect();
+        res.status(500).json({ stat: -1, msg: "Internal Server Error", error: error.message });
     }
-})
+});
 
+// Fetch documents using an AND condition
 app.post('/find-with-and/:collection_name', async (req, res) => {
-    const collection_name = req.params.collection_name;
-    const doc = req.body;
     try {
-        await db.db.connect();
-        let collection = await db.db.Connection.db.listCollections({ name: collection_name }).next();
-        if (collection) {
-            const collection = db.db.Connection.collection(collection_name);
-            const collection_data = await collection.find(doc).toArray();
-            await db.db.disconnect();
-            res.status(200).json(collection_data);
-        } else {
-            await db.db.disconnect();
-            res.json({ stat: 0, msg: "Collection not exists." });
-        }
-    } catch (error) {
-        await db.db.disconnect();
-        res.status(500).send("Internal Server Error");
-    }
-})
+        const collection_name = req.params.collection_name;
+        const query = req.body;
 
-app.post('/find-with-or/:collection_name', async (req, res) => {
-    const collection_name = req.params.collection_name;
-    const array_doc = req.body;
-    try {
-        await db.db.connect();
-        let collection = await db.db.Connection.db.listCollections({ name: collection_name }).next();
-        if (collection) {
-            const collection = db.db.Connection.collection(collection_name);
-            const collection_data = await collection.find({ $or: array_doc }).toArray();
-            await db.db.disconnect();
-            res.status(200).json(collection_data);
+        await db.connect();
+        const collectionExists = await db.Connection.db.listCollections({ name: collection_name }).next();
+
+        if (collectionExists) {
+            const collection = db.Connection.collection(collection_name);
+            const collectionData = await collection.find(query).toArray();
+
+            await db.disconnect();
+            res.status(200).json(collectionData);
         } else {
-            await db.db.disconnect();
-            res.json({ stat: 0, msg: "Collection not exists." });
+            await db.disconnect();
+            res.status(400).json({ stat: 0, msg: `Collection '${collection_name}' does not exist.` });
         }
     } catch (error) {
-        await db.db.disconnect();
-        res.status(500).send("Internal Server Error");
+        await db.disconnect();
+        res.status(500).json({ stat: -1, msg: "Internal Server Error", error: error.message });
     }
-})
+});
+
+// Fetch documents using an OR condition
+app.post('/find-with-or/:collection_name', async (req, res) => {
+    try {
+        const collection_name = req.params.collection_name;
+        const queryArray = req.body;
+
+        await db.connect();
+        const collectionExists = await db.Connection.db.listCollections({ name: collection_name }).next();
+
+        if (collectionExists) {
+            const collection = db.Connection.collection(collection_name);
+            const collectionData = await collection.find({ $or: queryArray }).toArray();
+
+            await db.disconnect();
+            res.status(200).json(collectionData);
+        } else {
+            await db.disconnect();
+            res.status(400).json({ stat: 0, msg: `Collection '${collection_name}' does not exist.` });
+        }
+    } catch (error) {
+        await db.disconnect();
+        res.status(500).json({ stat: -1, msg: "Internal Server Error", error: error.message });
+    }
+});
 
 
 
@@ -303,59 +379,73 @@ app.post('/find-with-or/:collection_name', async (req, res) => {
 //                                     MongoDB Update Operations
 // \--------------------------------------------------------------------------------------------/
 
+// Endpoint to update one document in a collection
 app.post('/update/:collection_name', async (req, res) => {
-    const collection_name = req.params.collection_name;
-    const array_doc = req.body;
     try {
-        await db.db.connect();
-        let collection = await db.db.Connection.db.listCollections({ name: collection_name }).next();
-        if (collection) {
-            const collection = db.db.Connection.collection(collection_name);
-            const collection_data = await collection.updateOne(array_doc['filter'], { $set: array_doc['update'] });
-            console.log(collection_data)
-            await db.db.disconnect();
-            if (collection_data) {
-                res.status(200).json({ stat: 1, msg: "Done" });
-            } else {
-                res.status(200).json({ stat: 0, msg: "Failed" });
-            }
+        const collection_name = req.params.collection_name;
+        const { filter, update } = req.body;
 
+        if (!filter || !update) {
+            return res.status(400).json({ stat: 0, msg: "Invalid request body. 'filter' and 'update' are required." });
+        }
+
+        await db.connect();
+        const collectionExists = await db.Connection.db.listCollections({ name: collection_name }).next();
+
+        if (collectionExists) {
+            const collection = db.Connection.collection(collection_name);
+            const result = await collection.updateOne(filter, { $set: update });
+
+            await db.disconnect();
+
+            if (result.modifiedCount > 0) {
+                res.status(200).json({ stat: 1, msg: "Update successful." });
+            } else {
+                res.status(200).json({ stat: 0, msg: "No documents were updated." });
+            }
         } else {
-            await db.db.disconnect();
-            res.json({ stat: 0, msg: "Collection not exists." });
+            await db.disconnect();
+            res.status(404).json({ stat: 0, msg: "Collection does not exist." });
         }
     } catch (error) {
-        await db.db.disconnect();
-        res.status(500).send("Internal Server Error");
+        await db.disconnect();
+        res.status(500).json({ stat: -1, msg: "Internal Server Error", error: error.message });
     }
-})
+});
 
+// Endpoint to update multiple documents in a collection
 app.post('/update-many/:collection_name', async (req, res) => {
-    const collection_name = req.params.collection_name;
-    const array_doc = req.body;
     try {
-        await db.db.connect();
-        let collection = await db.db.Connection.db.listCollections({ name: collection_name }).next();
-        if (collection) {
-            const collection = db.db.Connection.collection(collection_name);
-            const collection_data = await collection.updateMany(array_doc['filter'], { $set: array_doc['update'] });
-            console.log(collection_data)
-            await db.db.disconnect();
-            if (collection_data) {
-                res.status(200).json({ stat: 1, msg: "Done" });
-            } else {
-                res.status(200).json({ stat: 0, msg: "Failed" });
-            }
+        const collection_name = req.params.collection_name;
+        const { filter, update } = req.body;
 
+        if (!filter || !update) {
+            return res.status(400).json({ stat: 0, msg: "Invalid request body. 'filter' and 'update' are required." });
+        }
+
+        await db.connect();
+        const collectionExists = await db.Connection.db.listCollections({ name: collection_name }).next();
+
+        if (collectionExists) {
+            const collection = db.Connection.collection(collection_name);
+            const result = await collection.updateMany(filter, { $set: update });
+
+            await db.disconnect();
+
+            if (result.modifiedCount > 0) {
+                res.status(200).json({ stat: 1, msg: "Update successful." });
+            } else {
+                res.status(200).json({ stat: 0, msg: "No documents were updated." });
+            }
         } else {
-            await db.db.disconnect();
-            res.json({ stat: 0, msg: "Collection not exists." });
+            await db.disconnect();
+            res.status(404).json({ stat: 0, msg: "Collection does not exist." });
         }
     } catch (error) {
-        await db.db.disconnect();
-        res.status(500).send("Internal Server Error");
+        await db.disconnect();
+        res.status(500).json({ stat: -1, msg: "Internal Server Error", error: error.message });
     }
-})
+});
 
 
 // /--------------------------------------------------------------------------------------------\
@@ -363,59 +453,94 @@ app.post('/update-many/:collection_name', async (req, res) => {
 // \--------------------------------------------------------------------------------------------/
 
 app.post('/delete/:collection_name', async (req, res) => {
-    const collection_name = req.params.collection_name;
-    const doc = req.body;
     try {
-        await db.db.connect();
-        let collection = await db.db.Connection.db.listCollections({ name: collection_name }).next();
-        if (collection) {
-            const collection = db.db.Connection.collection(collection_name);
-            console.log(doc['filter']);
-            const collection_data = await collection.deleteOne(doc['filter']);
-            console.log(collection_data)
-            await db.db.disconnect();
-            if (collection_data) {
-                res.status(200).json({ stat: 1, msg: "Done" });
-            } else {
-                res.status(200).json({ stat: 0, msg: "Failed" });
-            }
+        const collection_name = req.params.collection_name; // Extract collection name from the URL
+        const doc = req.body; // Extract the document to be deleted from the request body
 
+        // Check if MongoDB is already connected
+        if (!db.Connection.readyState || db.Connection.readyState === 0) {
+            await db.connect();
+        }
+
+        // Check if the collection exists
+        const collectionExists = await db.Connection.db.listCollections({ name: collection_name }).next();
+
+        if (collectionExists) {
+            const collection = db.Connection.collection(collection_name);
+            const result = await collection.deleteOne(doc['filter']);
+            if (result.deletedCount > 0) {
+                return res.status(200).json({
+                    stat: 1,
+                    msg: "Document deleted successfully."
+                });
+            } else {
+                return res.status(404).json({
+                    stat: 0,
+                    msg: "No matching document found to delete."
+                });
+            }
         } else {
-            await db.db.disconnect();
-            res.json({ stat: 0, msg: "Collection not exists." });
+            return res.status(404).json({
+                stat: 0,
+                msg: `Collection '${collection_name}' does not exist.`
+            });
         }
     } catch (error) {
-        await db.db.disconnect();
+        // Send internal server error response
+        console.error('Error deleting document:', error.message);
         res.status(500).send("Internal Server Error");
+    } finally {
+        // Ensure the connection is closed in all cases
+        if (db.Connection.readyState === 1) {
+            await db.disconnect();
+        }
     }
-})
+});
 
 app.post('/delete-many/:collection_name', async (req, res) => {
-    const collection_name = req.params.collection_name;
-    const doc = req.body;
     try {
-        await db.db.connect();
-        let collection = await db.db.Connection.db.listCollections({ name: collection_name }).next();
-        if (collection) {
-            const collection = db.db.Connection.collection(collection_name);
-            const collection_data = await collection.deleteMany(doc['filter']);
-            console.log(collection_data)
-            await db.db.disconnect();
-            if (collection_data) {
-                res.status(200).json({ stat: 1, msg: "Done" });
-            } else {
-                res.status(200).json({ stat: 0, msg: "Failed" });
-            }
+        const collection_name = req.params.collection_name; // Extract collection name from the URL
+        const doc = req.body; // Extract the document with the filter from the request body
 
+        // Check if MongoDB is already connected
+        if (!db.Connection.readyState || db.Connection.readyState === 0) {
+            await db.connect();
+        }
+
+        // Check if the collection exists
+        const collectionExists = await db.Connection.db.listCollections({ name: collection_name }).next();
+
+        if (collectionExists) {
+            const collection = db.Connection.collection(collection_name);
+            const result = await collection.deleteMany(doc['filter']); 
+            if (result.deletedCount > 0) {
+                return res.status(200).json({
+                    stat: 1,
+                    msg: "Documents deleted successfully."
+                });
+            } else {
+                return res.status(404).json({
+                    stat: 0,
+                    msg: "No matching documents found to delete."
+                });
+            }
         } else {
-            await db.db.disconnect();
-            res.json({ stat: 0, msg: "Collection not exists." });
+            return res.status(404).json({
+                stat: 0,
+                msg: `Collection '${collection_name}' does not exist.`
+            });
         }
     } catch (error) {
-        await db.db.disconnect();
+        // Send internal server error response
+        console.error('Error deleting documents:', error.message);
         res.status(500).send("Internal Server Error");
+    } finally {
+        // Ensure the connection is closed in all cases
+        if (db.Connection.readyState === 1) {
+            await db.disconnect();
+        }
     }
-})
+});
 
 
 // /--------------------------------------------------------------------------------------------\
@@ -423,70 +548,104 @@ app.post('/delete-many/:collection_name', async (req, res) => {
 // \--------------------------------------------------------------------------------------------/
 
 async function buffer_to_image(buffer, outputPath, req, res) {
-    const collection_name = req.params.collection_name;
-    const doc = req.body;
-    fs.writeFile(outputPath, buffer, (err) => {
-        if (err) {
-            console.error('Error writing image:', err);
+    try {
+        const collection_name = req.params.collection_name;
+        const doc = req.body;
+
+        // Write the buffer to the output path
+        await new Promise((resolve, reject) => {
+            fs.writeFile(outputPath, buffer, (err) => {
+                if (err) reject(new Error('Error writing image: ' + err));
+                else resolve();
+            });
+        });
+
+        // Upload the image to Cloudinary
+        const result = await cloudinary.uploader.upload(outputPath);
+
+        // Add image URL to the document
+        doc['img_url'] = result.secure_url;
+
+        // Remove the local file after upload
+        fs.unlinkSync(outputPath);
+
+        // Connect to the database
+        await db.connect();
+
+        // Check if the collection exists
+        const collectionExists = await db.Connection.db.listCollections({ name: collection_name }).hasNext();
+
+        if (collectionExists) {
+            const collection = db.Connection.collection(collection_name);
+            const insertResult = await collection.insertOne(doc);
+
+            // Disconnect from the database
+            await db.disconnect();
+
+            // Respond with the success message
+            res.status(200).json({
+                stat: 1,
+                msg: "Data inserted with image",
+                secure_url: result.secure_url,
+                url: result.url,
+                original_filename: result.original_filename,
+                width: result.width,
+                height: result.height,
+                format: result.format,
+                resource_type: result.resource_type,
+                bytes: result.bytes
+            });
         } else {
-            cloudinary.uploader.upload(outputPath).then(async (result) => {
-                // console.log(result);
-                try {
-                    doc['img_url'] = result.secure_url;
-                    fs.unlinkSync(outputPath);
-                    // console.log(doc)
-                    await db.db.connect();
-                    let collection = await db.db.Connection.db.listCollections({ name: collection_name }).next();
-                    if (collection) {
-                        const collection = db.db.Connection.collection(collection_name);
-                        await collection.insertOne(doc);
-                        await db.db.disconnect();
-                        // res.status(200).json({ stat: 1, msg: "Done" });
-                        res.status(200).json({ msg: "Data inserted with image", stat: 1, secure_url: result.secure_url, url: result.url, original_filename: result.original_filename, width: result.width, height: result.height, format: result.format, resourse_type: result.resource_type, bytes: result.bytes });
-                    } else {
-                        await db.db.disconnect();
-                        res.json({ stat: 0, msg: "Collection not exists." });
-                    }
-
-                } catch (error) {
-                    res.json({ stat: 0, msg: error });
-                }
-
-            }, (err) => {
-                res.json({ stat: 0, msg: "Failed to upload" });
-            })
-            // console.log('Image successfully written to', outputPath);  
+            // Disconnect from the database if the collection does not exist
+            await db.disconnect();
+            res.status(404).json({ stat: 0, msg: "Collection does not exist." });
         }
-    });
-
+    } catch (error) {
+        // Disconnect from the database in case of any error
+        await db.disconnect();
+        res.status(500).json({ stat: -1, msg: "Internal Server Error", error: error.message });
+    }
 }
-
-
 
 app.post('/insert-image/:collection_name', upload.single('file'), async (req, res) => {
     try {
-        // console.log(req.file);
-        await buffer_to_image(req.file.buffer, path.join(__dirname, `./assets/${uniqid()}.${req.file.mimetype.split('/')[1]}`), req, res);
+        if (!req.file) {
+            return res.status(400).json({ stat: 0, msg: 'No file uploaded' });
+        }
+
+        console.log("File uploaded successfully:", req.file);
+
+        const fileExtension = req.file.mimetype.split('/')[1];
+        const outputPath = path.join(__dirname, `./assets/${uniqid()}.${fileExtension}`);
+
+        // Call the buffer_to_image function to handle the image processing
+        await buffer_to_image(req.file.buffer, outputPath, req, res);
+        console.log("Image processing completed");
+
     } catch (error) {
-        await db.db.disconnect();
-        res.status(500).send("Internal Server Error");
+        console.error("Error occurred:", error);
+        await db.disconnect();
+        res.status(500).json({ stat: -1, msg: 'Internal Server Error', error: error.message });
     }
-})
+});
+
 
 
 // /--------------------------------------------------------------------------------------------\
 //                                 News_API
 // \--------------------------------------------------------------------------------------------/
+
 app.get('/scrap-news/:collection_name', (req, res) => {
-    news_api(req, res);
-})
+    // Pass collection_name from the URL to scrap_data function
+    scrap_data(req, res);
+console.log("All Scrap Data ");
+});
 
 // /--------------------------------------------------------------------------------------------\
 //                                  Realtime chatting API
 // \--------------------------------------------------------------------------------------------/
 
 const clients = new Map();
-
 app.get('/chat-updates/:collection_name', async (req, res) => {
     const clientId = uuidv4();
 
@@ -503,61 +662,59 @@ app.get('/chat-updates/:collection_name', async (req, res) => {
 
     try {
         const collection_name = req.params.collection_name;
-        await db.db.connect();
-        let collection = await db.db.Connection.db.listCollections({ name: collection_name }).next();
+        await db.connect(); // db.connect() instead of db.db.connect()
+        let collection = await db.Connection.db.listCollections({ name: collection_name }).next();
         if (collection) {
-            const collection = db.db.Connection.collection(collection_name);
-            const collection_data = await collection.find().toArray();
-            await db.db.disconnect();
+            const collectionData = await db.Connection.collection(collection_name).find().toArray();
+            await db.disconnect(); // db.disconnect() instead of db.db.disconnect()
 
-            collection_data.forEach((message) => {
-                // res.write(`data: ${JSON.stringify(message)}\n\n`);
-                res.write(JSON.stringify(message));
+            collectionData.forEach((message) => {
+                res.write(`data: ${JSON.stringify(message)}\n\n`); // Sending data to the client
             });
         } else {
-            await db.db.disconnect();
-            res.json({ stat: 0, msg: "Collection not exists." });
+            await db.disconnect();
+            res.json({ stat: 0, msg: "Collection does not exist." });
         }
 
     } catch (error) {
         console.error('Error fetching chat messages:', error);
+        res.status(500).send("Internal Server Error");
     }
 });
-
 
 app.post('/send-message/:collection_name', async (req, res) => {
     try {
         const collection_name = req.params.collection_name;
         const doc = req.body;
-        // console.log(doc);
-        await db.db.connect();
-        // console.log(doc);
-        let collection = await db.db.Connection.db.listCollections({ name: collection_name }).next();
-        if (collection) {
-            const collection = db.db.Connection.collection(collection_name);
-            await collection.insertOne(doc);
-            const collection_data = await collection.find().toArray();
-            await db.db.disconnect();
-            for (const [clientId, clientResponse] of clients) {
-                // clientResponse.write(`data: ${JSON.stringify(doc)}\n\n`);
-                clientResponse.write(JSON.stringify(doc));
-            }
-            res.sendStatus(200);
-            // res.status(200).json({ stat: 1, msg: "Done" });
-        } else {
-            await db.db.disconnect();
-            res.json({ stat: 0, msg: "Collection not exists." });
-        }
 
+        await db.connect(); // db.connect() instead of db.db.connect()
+        let collection = await db.Connection.db.listCollections({ name: collection_name }).next();
+        if (collection) {
+            const collection = db.Connection.collection(collection_name);
+            await collection.insertOne(doc);
+            const collectionData = await collection.find().toArray();
+            await db.disconnect(); // db.disconnect() instead of db.db.disconnect()
+
+            // Broadcast the new message to all connected clients
+            for (const [clientId, clientResponse] of clients) {
+                clientResponse.write(`data: ${JSON.stringify(doc)}\n\n`);
+            }
+
+            res.sendStatus(200);
+        } else {
+            await db.disconnect();
+            res.json({ stat: 0, msg: "Collection does not exist." });
+        }
 
     } catch (error) {
         console.error('Error saving chat message:', error);
-        res.sendStatus(500);
+        res.status(500).send("Internal Server Error");
     }
 });
 
 app.get('/close-connections', (req, res) => {
     try {
+        // Close all client connections
         for (const [clientId, clientResponse] of clients) {
             clientResponse.end();
             clients.delete(clientId);
@@ -568,6 +725,7 @@ app.get('/close-connections', (req, res) => {
         res.sendStatus(500);
     }
 });
+
 
 // /--------------------------------------------------------------------------------------------\
 //                              Message Notification Using Model
@@ -614,8 +772,8 @@ app.get('/get-notification/:userid/:field_name', async (req, res) => {
             }else{
                 await db.db.disconnect();
                 res.json({stat:0, "msg":'field name not exists'})
-            }     
-        } 
+}
+        }
     } catch (error) {
         res.status(500).send("Internal Server Error");
     }

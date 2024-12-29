@@ -1,101 +1,66 @@
 const { PythonShell } = require('python-shell');
 const path = require('path');
 const fs = require('fs');
-const db = require('./db')
-const { parse } = require('dotenv');
-
+const db = require('./db'); // Import the updated db connection file
 
 async function scrap_data(req, res) {
-    const data = await PythonShell.run(path.join(__dirname, '../python_news_scrapper/news_scraper.py'), null);
-    console.log(data)
-    if (data[data.length - 1]) {
-        // console.log(data)
-        if (fs.existsSync(path.join(__dirname, '../assets/scrap_data.json'))) {
-            const file = fs.readFileSync(path.join(__dirname, '../assets/scrap_data.json'))
-            const parse_data = JSON.parse(file)
-            fs.unlinkSync(path.join(__dirname, '../assets/scrap_data.json'));
+    try {
+        const data = await PythonShell.run(path.join(__dirname, '../python_news_scrapper/news_scraper.py'));
+        console.log('Python Script Output:', data);
+
+        const filePath = path.join(__dirname, '../assets/scrap_data.json');
+        if (fs.existsSync(filePath)) {
+            const fileContent = fs.readFileSync(filePath, 'utf-8');
+            let parsedData;
             try {
-                const collection_name = req.params.collection_name;
-                await db.db.connect();
-                let collection = await db.db.Connection.db.listCollections({ name: collection_name }).next();
-                if (collection) {
-                    let reverse_agri_news = parse_data['agri_news'].reverse();
-                    // let reverse_agri_news = [{"a":"sonu"},{"heading": "India's tea industry getting drowsy, needs some 'kadak' measures"}].reverse();
-                    let agri_news = parse_data['agri_news'];
-                    // let agri_news = [{'heading':'ram'},{"heading": "India's tea industry getting drowsy, needs some 'kadak' measures"},{'heading':"b"}, {'heading':'c'}];
-                    const collection = db.db.Connection.collection(collection_name);
-                    const collection_data = await collection.find().toArray();
-                    const reverse_collection_data = collection_data.reverse();
-                    if (reverse_collection_data.length == 0) {
-                        await collection.insertMany(reverse_agri_news);
-                        await db.db.disconnect();
-                        res.status(200).json({ stat: 1, msg: "Done" });
-                    }else if(agri_news.length < reverse_collection_data.length){
-                        // console.log('k')
-                        let final_news = [];
-                        for(let i = 0; i<agri_news.length;i++){
-                            let found = false;
-                            for(let j=0; j<agri_news.length;j++){
-                                if(agri_news[i].heading == reverse_collection_data[j].heading){
-                                    found = true;   
-                                }
-                            }
-
-                            if (!found) {
-                                final_news.push(agri_news[i]);
-                            }
-                        }
-                        // console.log(final_news);
-                        if (final_news.length != 0){
-                            await collection.insertMany(final_news.reverse());
-                            await db.db.disconnect();
-                            res.status(200).json({ stat: 1, msg: "Done" });
-                        }else{
-                            res.status(200).json({ stat: 1, msg: "Done" });
-                        }
-                        
-                    }else{
-                        // console.log('m')
-                        let final_news = [];
-                        for(let i = 0; i<agri_news.length;i++){
-                            let found = false;
-                            for(let j=0; j<reverse_collection_data.length;j++){
-                                if(agri_news[i].heading == reverse_collection_data[j].heading){
-                                    found = true; 
-                                }
-                            }
-                            if (!found) {
-                                final_news.push(agri_news[i]);
-                            }
-                        }
-                        // console.log(final_news);
-                        if (final_news.length != 0){
-                            await collection.insertMany(final_news.reverse());
-                            await db.db.disconnect();
-                            res.status(200).json({ stat: 1, msg: "Done" });
-                        }else{
-                            res.status(200).json({ stat: 1, msg: "Done" });
-                        }
-                    }
-
-                } else {
-                    await db.db.disconnect();
-                    res.json({ stat: 0, msg: "Collection not exists." });
-                }
-
-            } catch (error) {
-                await db.db.disconnect();
-                res.status(500).send("Internal Server Error");
+                parsedData = JSON.parse(fileContent);
+                console.log('Parsed JSON Data:', parsedData);
+            } catch (parseError) {
+                console.error('JSON Parsing Error:', parseError);
+                throw new Error('Invalid JSON format in scrap_data.json');
             }
+
+            if (!Array.isArray(parsedData)) {
+                parsedData = [parsedData];
+                console.log('Converted parsed data to an array.');
+            }
+
+            await db.connect();
+            const collectionName = req.params.collection_name;
+            const collection = db.Connection.collection(collectionName);
+
+            const collectionExists = await db.Connection.db.listCollections({ name: collectionName }).hasNext();
+            if (!collectionExists) {
+                await db.disconnect();
+                return res.status(404).json({ stat: 0, msg: "Collection does not exist." });
+            }
+
+            const existingData = await collection.find().toArray();
+            console.log('Existing Data:', existingData);
+
+            const finalNews = parsedData.filter(news => !existingData.some(item => item.heading === news.heading));
+            console.log('Final News to insert:', finalNews);
+
+            if (finalNews.length > 0) {
+                await collection.insertMany(finalNews.reverse());
+                console.log('New news items inserted:', finalNews.length);
+            } else {
+                console.log('No new news items to insert.');
+            }
+
+            await db.disconnect();
+            res.status(200).json({ stat: 1, msg: 'Data processed successfully.' });
         } else {
-            res.send("Some Error Occured")
+            fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+            console.log('Created scrap_data.json successfully.');
+            res.status(200).send({ stat: 1, msg: 'No existing data found. Created new file.' });
         }
-
+    } catch (error) {
+        console.error('Error during scraping:', error.message);
+        await db.disconnect();
+        res.status(500).json({ stat: 0, msg: 'Scraping failed', error: error.message });
     }
-    else {
-        res.send("Server Error");
-    }
-
 }
 
-module.exports = scrap_data;
+
+module.exports = { scrap_data };
